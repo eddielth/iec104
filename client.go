@@ -684,63 +684,6 @@ func (c *Client) GeneralInterrogation(commonAddr uint16) error {
 	}
 }
 
-// ReadSinglePoint reads a single point value
-func (c *Client) ReadSinglePoint(commonAddr uint16, objAddr uint32) (bool, error) {
-	if !c.IsConnected() {
-		return false, errors.New("connection not established")
-	}
-
-	asdu := &ASDU{
-		TypeID:     TypeReadCommand,
-		Variable:   0x01,
-		Cause:      CauseReq,
-		CommonAddr: commonAddr,
-		InfoObjects: []InfoObject{
-			{
-				Address: objAddr,
-			},
-		},
-	}
-
-	if err := c.sendIFrame(asdu); err != nil {
-		return false, fmt.Errorf("failed to send read command: %v", err)
-	}
-
-	select {
-	case resp := <-c.responseChan:
-		if resp.ASDU == nil || len(resp.ASDU.InfoObjects) == 0 {
-			return false, errors.New("invalid response")
-		}
-
-		if resp.ASDU.TypeID == TypeReadCommand && resp.ASDU.Cause == CauseActCon {
-			select {
-			case dataResp := <-c.responseChan:
-				if dataResp.ASDU == nil || len(dataResp.ASDU.InfoObjects) == 0 {
-					return false, errors.New("invalid data response")
-				}
-
-				for _, obj := range dataResp.ASDU.InfoObjects {
-					if obj.Address == objAddr {
-						if val, ok := obj.Value.(bool); ok {
-							return val, nil
-						}
-					}
-				}
-				return false, errors.New("no data was found for the corresponding address")
-			case <-time.After(c.timeout):
-				return false, errors.New("timeout waiting for data response")
-			}
-		}
-		return false, fmt.Errorf("read command not confirmed, reason: 0x%04X", resp.ASDU.Cause)
-
-	case <-time.After(c.timeout):
-		return false, errors.New("timeout waiting for read command confirmation")
-
-	case <-c.ctx.Done():
-		return false, errors.New("operation cancelled")
-	}
-}
-
 // ReadMeasuredValue reads a measured value
 func (c *Client) ReadMeasuredValue(commonAddr uint16, objAddr uint32) (interface{}, byte, error) {
 	if !c.IsConnected() {

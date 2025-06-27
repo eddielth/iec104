@@ -29,13 +29,6 @@ func main() {
 	}
 	log.Printf("measured value: %.2f, quality: 0x%02X", value, quality)
 
-	// status, err := client.ReadSinglePoint(0x0001, 0x000200)
-	// if err != nil {
-	// 	logger.Printf("unable to read single point: %v", err)
-	// } else {
-	// 	logger.Printf("single point: %v", status)
-	// }
-
 	time.Sleep(1 * time.Second)
 
 }
