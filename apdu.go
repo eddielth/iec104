@@ -31,10 +31,10 @@ func (c *Client) encodeAPDU(apdu *APDU) ([]byte, error) {
 		sendSeq := apdu.SendSeq & 0x7FFF // Ensure 15 bits
 		recvSeq := apdu.RecvSeq & 0x7FFF // Ensure 15 bits
 
-		ctrl1 := byte((sendSeq << 1) & 0xFE)
-		ctrl2 := byte((sendSeq >> 7) & 0xFE)
-		ctrl3 := byte((recvSeq << 1) & 0xFE)
-		ctrl4 := byte((recvSeq >> 7) & 0xFE)
+		ctrl1 := byte(sendSeq << 1)
+		ctrl2 := byte(sendSeq >> 7)
+		ctrl3 := byte(recvSeq << 1)
+		ctrl4 := byte(recvSeq >> 7)
 		buf.Write([]byte{ctrl1, ctrl2, ctrl3, ctrl4})
 
 		// ASDU
@@ -51,8 +51,8 @@ func (c *Client) encodeAPDU(apdu *APDU) ([]byte, error) {
 
 		ctrl1 := byte(0x01)
 		ctrl2 := byte(0x00)
-		ctrl3 := byte((recvSeq << 1) & 0xFE)
-		ctrl4 := byte((recvSeq >> 7) & 0xFE)
+		ctrl3 := byte(recvSeq << 1)
+		ctrl4 := byte(recvSeq >> 7)
 		buf.Write([]byte{ctrl1, ctrl2, ctrl3, ctrl4})
 
 	case UFrame:
@@ -99,8 +99,8 @@ func (c *Client) decodeAPDU(data []byte) (*APDU, error) {
 	// I-frame (lowest bit is 0)
 	if (ctrl1 & 0x01) == 0 {
 		apdu.Type = IFrame
-		apdu.SendSeq = (uint16(ctrl1>>1) | (uint16(ctrl2&0x7F) << 7)) & 0x7FFF
-		apdu.RecvSeq = (uint16(ctrl3>>1) | (uint16(ctrl4&0x7F) << 7)) & 0x7FFF
+		apdu.SendSeq = (uint16(ctrl1>>1) | (uint16(ctrl2) << 7)) & 0x7FFF
+		apdu.RecvSeq = (uint16(ctrl3>>1) | (uint16(ctrl4) << 7)) & 0x7FFF
 
 		// Parse ASDU (if present)
 		if len(data) > 6 {
@@ -114,7 +114,7 @@ func (c *Client) decodeAPDU(data []byte) (*APDU, error) {
 		// S-frame (lowest 2 bits are 01)
 	} else if (ctrl1 & 0x03) == 0x01 {
 		apdu.Type = SFrame
-		apdu.RecvSeq = (uint16(ctrl3>>1) | (uint16(ctrl4&0x7F) << 7)) & 0x7FFF
+		apdu.RecvSeq = (uint16(ctrl3>>1) | (uint16(ctrl4) << 7)) & 0x7FFF
 
 		// U-frame (lowest 2 bits are 11)
 	} else if (ctrl1 & 0x03) == 0x03 {

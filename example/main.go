@@ -23,12 +23,15 @@ func main() {
 	}
 	log.Printf("general interrogation executed successfully")
 
-	value, quality, err := client.ReadMeasuredValue(1, 1001)
-	if err != nil {
-		log.Fatalf("unable to read measured value: %v", err)
-	}
-	log.Printf("measured value: %.2f, quality: 0x%02X", value, quality)
+	for {
 
-	time.Sleep(1 * time.Second)
+		value, quality, err := client.ReadMeasuredValue(1, 1)
+		if err != nil {
+			log.Fatalf("unable to read measured value: %v", err)
+		}
+		log.Printf("measured value: %v, quality: 0x%02X", value, quality)
+
+		time.Sleep(1 * time.Second)
+	}
 
 }

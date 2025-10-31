@@ -73,8 +73,8 @@ func (c *Client) SetLogger(logger *log.Logger) {
 	c.logger = logger
 }
 
-// GetState gets the connection state
-func (c *Client) GetState() ConnectionState {
+// getState gets the connection state
+func (c *Client) getState() ConnectionState {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.state
@@ -91,13 +91,13 @@ func (c *Client) setState(state ConnectionState) {
 
 // IsConnected checks if connected
 func (c *Client) IsConnected() bool {
-	return c.GetState() == Connected
+	return c.getState() == Connected
 }
 
 // Connect connects to IEC104 server
 func (c *Client) Connect() error {
 	// Check current state
-	currentState := c.GetState()
+	currentState := c.getState()
 	if currentState != Disconnected {
 		return fmt.Errorf("cannot connect: current state is %s", currentState)
 	}
@@ -127,12 +127,9 @@ func (c *Client) Connect() error {
 	// Start receive goroutine
 	go c.receiveHandler()
 
-	// Start heartbeat goroutine
-	go c.heartbeatHandler()
-
 	// Send startup frame
 	if err := c.sendUFrame(UFrameStartDTAct); err != nil {
-		c.Disconnect()
+		c.disconnect()
 		return fmt.Errorf("failed to send startup frame: %v", err)
 	}
 
@@ -140,26 +137,29 @@ func (c *Client) Connect() error {
 	select {
 	case resp := <-c.responseChan:
 		if resp.UControl != UFrameStartDTCfm {
-			c.Disconnect()
+			c.disconnect()
 			return errors.New("server did not confirm startup frame")
 		}
 		c.setState(Connected)
 		c.logf("Successfully connected to server")
 
 	case <-time.After(c.timeout):
-		c.Disconnect()
+		c.disconnect()
 		return errors.New("timeout waiting for startup confirmation")
 
 	case <-c.ctx.Done():
-		c.Disconnect()
+		c.disconnect()
 		return errors.New("connection was cancelled")
 	}
+
+	// Start heartbeat goroutine
+	go c.heartbeatHandler()
 
 	return nil
 }
 
-// Disconnect disconnects from the server
-func (c *Client) Disconnect() error {
+// disconnect disconnects from the server
+func (c *Client) disconnect() error {
 	// Stop heartbeat
 	if c.heartbeatTicker != nil {
 		c.heartbeatTicker.Stop()
@@ -196,8 +196,8 @@ func (c *Client) Close() error {
 	// Ensure all goroutines receive the cancel signal
 	time.Sleep(100 * time.Millisecond)
 
-	// Disconnect
-	return c.Disconnect()
+	// disconnect
+	return c.disconnect()
 }
 
 // UFrameCommand U-frame command type
@@ -246,10 +246,17 @@ func (c *Client) sendSFrame() error {
 		return errors.New("connection not established")
 	}
 
+	var conn net.Conn
 	var recvSeq uint16
+
 	c.mu.Lock()
+	conn = c.conn
 	recvSeq = c.recvSeqNum
 	c.mu.Unlock()
+
+	if conn == nil {
+		return errors.New("connection closed")
+	}
 
 	apdu := &APDU{
 		Type:    SFrame,
@@ -259,15 +266,6 @@ func (c *Client) sendSFrame() error {
 	data, err := c.encodeAPDU(apdu)
 	if err != nil {
 		return err
-	}
-
-	var conn net.Conn
-	c.mu.Lock()
-	conn = c.conn
-	c.mu.Unlock()
-
-	if conn == nil {
-		return errors.New("connection closed")
 	}
 
 	_, err = conn.Write(data)
@@ -424,7 +422,7 @@ func (c *Client) receiveHandler() {
 			c.mu.Unlock()
 
 			// Try reconnect if auto-reconnect enabled
-			if c.GetState() == Disconnected {
+			if c.getState() == Disconnected {
 				go func() {
 					if err := c.Reconnect(); err != nil {
 						c.logf("Reconnect failed: %v", err)
@@ -472,6 +470,13 @@ func (c *Client) receiveHandler() {
 				continue
 			}
 
+			// Update sequence numbers for I-frames
+			if apdu.Type == IFrame {
+				c.mu.Lock()
+				c.recvSeqNum = (apdu.SendSeq + 1) & 0x7FFF
+				c.mu.Unlock()
+			}
+
 			// Priority: If it is an I-frame, try routing to pending
 			pendingHandled := false
 			if apdu.Type == IFrame && apdu.ASDU != nil && len(apdu.ASDU.InfoObjects) > 0 {
@@ -504,12 +509,6 @@ func (c *Client) handleAPDU(apdu *APDU) {
 	case IFrame:
 		if apdu.ASDU != nil {
 
-			// Update expected sequence number
-			c.mu.Lock()
-			c.recvSeqNum = (apdu.SendSeq + 1) & 0x7FFF
-			c.mu.Unlock()
-
-			// Send S frame confirmation
 			if err := c.sendSFrame(); err != nil {
 				c.logf("Send S frame confirmation failed: %v", err)
 				if err == io.EOF {
@@ -529,8 +528,10 @@ func (c *Client) handleAPDU(apdu *APDU) {
 		c.logf("Received S frame: %d", apdu.RecvSeq)
 		// Update confirmation status
 		c.mu.Lock()
-		if apdu.RecvSeq > c.sendSeqNum {
-			c.sendSeqNum = apdu.RecvSeq
+		// Only update send sequence number if the received sequence number is larger
+		// This confirms that our previously sent messages have been received
+		if IsSeqNumGreater(apdu.RecvSeq, c.sendSeqNum, MaxSeqNum+1) {
+			c.sendSeqNum = apdu.RecvSeq & 0x7FFF
 		}
 		c.mu.Unlock()
 
@@ -619,9 +620,6 @@ func (c *Client) heartbeatHandler() {
 
 // GeneralInterrogation general interrogation
 func (c *Client) GeneralInterrogation(commonAddr uint16) error {
-	if !c.IsConnected() {
-		return errors.New("not connected")
-	}
 
 	asdu := &ASDU{
 		TypeID:     TypeInterrogationCmd,
@@ -686,9 +684,6 @@ func (c *Client) GeneralInterrogation(commonAddr uint16) error {
 
 // ReadMeasuredValue reads a measured value
 func (c *Client) ReadMeasuredValue(commonAddr uint16, objAddr uint32) (interface{}, byte, error) {
-	if !c.IsConnected() {
-		return 0, 0, errors.New("not connected")
-	}
 
 	asdu := &ASDU{
 		TypeID:     TypeReadCommand,
@@ -702,18 +697,13 @@ func (c *Client) ReadMeasuredValue(commonAddr uint16, objAddr uint32) (interface
 		},
 	}
 
-	respChan, key, err := c.sendIFrameWithResp(asdu)
+	respChan, _, err := c.sendIFrameWithResp(asdu)
 	if err != nil {
 		return 0, 0, fmt.Errorf("failed to send read command: %v", err)
 	}
 
 	timer := time.NewTimer(c.timeout)
 	defer timer.Stop()
-	defer func() {
-		c.pendingMu.Lock()
-		delete(c.pending, key)
-		c.pendingMu.Unlock()
-	}()
 
 	for {
 		select {
@@ -739,9 +729,6 @@ func (c *Client) ReadMeasuredValue(commonAddr uint16, objAddr uint32) (interface
 }
 
 func (c *Client) SendSingleCommand(addr uint16, objAddr uint32, value bool, selectExec bool) error {
-	if !c.IsConnected() {
-		return errors.New("not connected")
-	}
 
 	var cmdValue byte
 	if value {
@@ -801,9 +788,6 @@ func (c *Client) SendSingleCommand(addr uint16, objAddr uint32, value bool, sele
 }
 
 func (c *Client) SendDoubleCommand(addr uint16, obj uint32, val byte) error {
-	if !c.IsConnected() {
-		return errors.New("not connected")
-	}
 
 	asdu := &ASDU{
 		TypeID:     TypeDoubleCommand,
@@ -845,9 +829,6 @@ func (c *Client) SendDoubleCommand(addr uint16, obj uint32, val byte) error {
 }
 
 func (c *Client) SendSetpointCommand(addr uint16, obj uint32, val float32) error {
-	if !c.IsConnected() {
-		return errors.New("not connected")
-	}
 
 	asdu := &ASDU{
 		TypeID:     TypeSetpointCommandSFA,
@@ -889,9 +870,6 @@ func (c *Client) SendSetpointCommand(addr uint16, obj uint32, val float32) error
 }
 
 func (c *Client) ClockSynchronization(addr uint16) error {
-	if !c.IsConnected() {
-		return errors.New("not connected")
-	}
 
 	now := time.Now()
 
@@ -934,22 +912,12 @@ func (c *Client) ClockSynchronization(addr uint16) error {
 	}
 }
 
-// GetResponseChannel returns the response channel
-func (c *Client) GetResponseChannel() chan *APDU {
-	return c.responseChan
-}
-
-// GetErrorChannel returns the error channel
-func (c *Client) GetErrorChannel() chan error {
-	return c.errorChan
-}
-
 // Reconnect implements reconnection functionality
 func (c *Client) Reconnect() error {
 	c.logf("starting reconnection...")
 
-	// Disconnect existing connection
-	c.Disconnect()
+	// disconnect existing connection
+	c.disconnect()
 
 	// Wait before reconnecting
 	time.Sleep(time.Second * 2)
@@ -969,43 +937,6 @@ func (c *Client) Reconnect() error {
 	}
 
 	return fmt.Errorf("reconnection failed after %d attempts", MaxRetries)
-}
-
-// StartAutoReconnect starts auto reconnection
-func (c *Client) StartAutoReconnect() {
-	go func() {
-		for {
-			select {
-			case <-c.ctx.Done():
-				return
-			default:
-			}
-
-			if c.GetState() == Disconnected {
-				c.logf("connection lost, starting auto-reconnection...")
-				if err := c.Reconnect(); err != nil {
-					c.logf("auto-reconnection failed: %v", err)
-				}
-			}
-
-			time.Sleep(time.Second * 10) // Check every 10 seconds
-		}
-	}()
-}
-
-// GetStatistics gets client statistics
-func (c *Client) GetStatistics() map[string]interface{} {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-
-	return map[string]interface{}{
-		"state":          c.state.String(),
-		"send_seq_num":   c.sendSeqNum,
-		"recv_seq_num":   c.recvSeqNum,
-		"last_activity":  c.lastActivity,
-		"server_address": c.addr,
-		"timeout":        c.timeout,
-	}
 }
 
 // WaitForData waits for specific type of data
