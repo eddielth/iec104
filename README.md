@@ -71,16 +71,18 @@ func main() {
 
 ## API Overview
 
-- `Connect()`, `Disconnect()`, `Close()` — Connection management
-- `GeneralInterrogation(commonAddr uint16)` — General interrogation
-- `ReadMeasuredValue(commonAddr uint16, objAddr uint32)` — Read measured value
-- `SendSingleCommand(addr uint16, objAddr uint32, value bool, selectExec bool)` — Send single-point command
-- `SendDoubleCommand(addr uint16, objAddr uint32, val byte)` — Send double-point command
-- `SendSetpointCommand(addr uint16, objAddr uint32, val float32)` — Send setpoint command
-- `ClockSynchronization(addr uint16)` — Clock synchronization
-- `StartAutoReconnect()` — Enable auto-reconnection
-- `EnableLog()`, `DisableLog()` — Logging control
-- `GetStatistics()` — Get client statistics
+- `NewClient(addr string, timeout time.Duration) *Client` — Create a new IEC104 client
+- `Connect() error` — Connect to the IEC104 server
+- `Close() error` — Close the connection
+- `IsConnected() bool` — Check if client is connected
+- `GeneralInterrogation(commonAddr uint16) error` — Execute general interrogation
+- `ReadMeasuredValue(commonAddr uint16, objAddr uint32) (interface{}, byte, error)` — Read measured value
+- `SendSingleCommand(addr uint16, objAddr uint32, value bool, selectExec bool) error` — Send single-point command
+- `SendDoubleCommand(addr uint16, obj uint32, val byte) error` — Send double-point command
+- `SendSetpointCommand(addr uint16, obj uint32, val float32) error` — Send setpoint command
+- `ClockSynchronization(addr uint16) error` — Perform clock synchronization
+- `EnableLog()` — Enable logging
+- `DisableLog()` — Disable logging
 
 ## License
 
