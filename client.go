@@ -912,22 +912,43 @@ func (c *Client) ClockSynchronization(addr uint16) error {
 	}
 }
 
-// Reconnect implements reconnection functionality
+// Reconnect implements reconnection functionality with exponential backoff
 func (c *Client) Reconnect() error {
 	c.logf("starting reconnection...")
 
 	// disconnect existing connection
 	c.disconnect()
 
-	// Wait before reconnecting
-	time.Sleep(time.Second * 2)
+	// Initial delay
+	delay := 2 * time.Second
+	startTime := time.Now()
+	oneHour := 1 * time.Hour
 
-	// Try to reconnect
-	for i := 0; i < MaxRetries; i++ {
+	// Try to reconnect with exponential backoff
+	for {
 		if err := c.Connect(); err != nil {
-			c.logf("reconnection failed (attempt %d/%d): %v", i+1, MaxRetries, err)
-			if i < MaxRetries-1 {
-				time.Sleep(time.Second * 5)
+			c.logf("reconnection failed: %v", err)
+			
+			// Check if one hour has passed since we started reconnecting
+			if time.Since(startTime) >= oneHour {
+				// Reset the timer and delay
+				startTime = time.Now()
+				delay = 2 * time.Second
+				c.logf("resetting reconnect delay after 1 hour")
+			} else {
+				// Double the delay for next attempt, but cap it at 1 hour
+				delay *= 2
+				if delay > oneHour {
+					delay = oneHour
+				}
+			}
+			
+			c.logf("waiting %v before next reconnect attempt", delay)
+			select {
+			case <-time.After(delay):
+				// Continue to next retry
+			case <-c.ctx.Done():
+				return fmt.Errorf("reconnection cancelled")
 			}
 			continue
 		}
@@ -935,8 +956,6 @@ func (c *Client) Reconnect() error {
 		c.logf("reconnection successful")
 		return nil
 	}
-
-	return fmt.Errorf("reconnection failed after %d attempts", MaxRetries)
 }
 
 // WaitForData waits for specific type of data
