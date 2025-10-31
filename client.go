@@ -319,9 +319,9 @@ func (c *Client) sendIFrame(asdu *ASDU) error {
 	return err
 }
 
-func (c *Client) sendIFrameWithResp(asdu *ASDU) (chan *APDU, string, error) {
+func (c *Client) sendIFrameWithResp(asdu *ASDU) (chan *APDU, error) {
 	if !c.IsConnected() {
-		return nil, "", errors.New("connection not established")
+		return nil, errors.New("connection not established")
 	}
 
 	var sendSeq, recvSeq uint16
@@ -338,8 +338,9 @@ func (c *Client) sendIFrameWithResp(asdu *ASDU) (chan *APDU, string, error) {
 		ASDU:    asdu,
 	}
 
-	key := makeRequestKey(asdu.CommonAddr, asdu.InfoObjects[0].Address)
-	respChan := make(chan *APDU, 2)
+	// The response will have our sendSeq as its recvSeq
+	key := makeRequestKey(sendSeq + 1)
+	respChan := make(chan *APDU, 1) // Buffer only needs to be 1
 	c.pendingMu.Lock()
 	c.pending[key] = respChan
 	c.pendingMu.Unlock()
@@ -349,7 +350,7 @@ func (c *Client) sendIFrameWithResp(asdu *ASDU) (chan *APDU, string, error) {
 		c.pendingMu.Lock()
 		delete(c.pending, key)
 		c.pendingMu.Unlock()
-		return nil, key, err
+		return nil, err
 	}
 
 	var conn net.Conn
@@ -361,7 +362,7 @@ func (c *Client) sendIFrameWithResp(asdu *ASDU) (chan *APDU, string, error) {
 		c.pendingMu.Lock()
 		delete(c.pending, key)
 		c.pendingMu.Unlock()
-		return nil, key, errors.New("connection closed")
+		return nil, errors.New("connection closed")
 	}
 	_, err = conn.Write(data)
 	if err == nil {
@@ -373,7 +374,7 @@ func (c *Client) sendIFrameWithResp(asdu *ASDU) (chan *APDU, string, error) {
 		delete(c.pending, key)
 		c.pendingMu.Unlock()
 	}
-	return respChan, key, err
+	return respChan, err
 }
 
 // receiveHandler handles incoming messages
@@ -480,7 +481,7 @@ func (c *Client) receiveHandler() {
 			// Priority: If it is an I-frame, try routing to pending
 			pendingHandled := false
 			if apdu.Type == IFrame && apdu.ASDU != nil && len(apdu.ASDU.InfoObjects) > 0 {
-				key := makeRequestKey(apdu.ASDU.CommonAddr, apdu.ASDU.InfoObjects[0].Address)
+				key := makeRequestKey(apdu.RecvSeq)
 				c.pendingMu.Lock()
 				if ch, ok := c.pending[key]; ok {
 					select {
@@ -697,7 +698,7 @@ func (c *Client) ReadMeasuredValue(commonAddr uint16, objAddr uint32) (interface
 		},
 	}
 
-	respChan, _, err := c.sendIFrameWithResp(asdu)
+	respChan, err := c.sendIFrameWithResp(asdu)
 	if err != nil {
 		return 0, 0, fmt.Errorf("failed to send read command: %v", err)
 	}
@@ -705,26 +706,28 @@ func (c *Client) ReadMeasuredValue(commonAddr uint16, objAddr uint32) (interface
 	timer := time.NewTimer(c.timeout)
 	defer timer.Stop()
 
-	for {
-		select {
-		case resp := <-respChan:
-			if resp.ASDU == nil || len(resp.ASDU.InfoObjects) == 0 {
-				continue
-			}
-			if resp.ASDU.TypeID == TypeReadCommand && resp.ASDU.Cause == CauseActCon {
-				continue // wait for next
-			}
-			for _, obj := range resp.ASDU.InfoObjects {
-				if obj.Address == objAddr {
-					return obj.Value, obj.Quality, nil
-				}
-			}
-			return 0, 0, errors.New("no data was found for the corresponding address")
-		case <-timer.C:
-			return 0, 0, errors.New("timeout waiting for measured value response")
-		case <-c.ctx.Done():
-			return 0, 0, errors.New("operation cancelled")
+	select {
+	case resp := <-respChan:
+		if resp.ASDU == nil || len(resp.ASDU.InfoObjects) == 0 {
+			return 0, 0, errors.New("invalid response")
 		}
+
+		// Validate response type and cause
+		if resp.ASDU.TypeID == TypeReadCommand && resp.ASDU.Cause == CauseActCon {
+			return 0, 0, errors.New("unexpected activation confirmation")
+		}
+
+		// Look for the object with matching address
+		for _, obj := range resp.ASDU.InfoObjects {
+			if obj.Address == objAddr {
+				return obj.Value, obj.Quality, nil
+			}
+		}
+		return 0, 0, errors.New("no data was found for the corresponding address")
+	case <-timer.C:
+		return 0, 0, errors.New("timeout waiting for measured value response")
+	case <-c.ctx.Done():
+		return 0, 0, errors.New("operation cancelled")
 	}
 }
 
@@ -928,7 +931,7 @@ func (c *Client) Reconnect() error {
 	for {
 		if err := c.Connect(); err != nil {
 			c.logf("reconnection failed: %v", err)
-			
+
 			// Check if one hour has passed since we started reconnecting
 			if time.Since(startTime) >= oneHour {
 				// Reset the timer and delay
@@ -942,7 +945,7 @@ func (c *Client) Reconnect() error {
 					delay = oneHour
 				}
 			}
-			
+
 			c.logf("waiting %v before next reconnect attempt", delay)
 			select {
 			case <-time.After(delay):
