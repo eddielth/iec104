@@ -18,7 +18,7 @@ type InfoObject struct {
 }
 
 func (i InfoObject) String() string {
-	return fmt.Sprintf("Address: 0x%04X, Value: %v, Quality: 0x%02X, Time: %v", i.Address, i.Value, i.Quality, i.Time)
+	return fmt.Sprintf("Address: 0x%04X, Value: %v, Quality: 0x%02X\n", i.Address, i.Value, i.Quality)
 }
 
 // encodeInfoObjectValue encodes value according to typeID

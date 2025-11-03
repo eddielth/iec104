@@ -10,7 +10,7 @@ import (
 func main() {
 
 	client := iec104.NewClient("127.0.0.1:2404", 5*time.Second)
-	client.EnableLog()
+	// client.EnableLog()
 
 	if err := client.Connect(); err != nil {
 		log.Fatalf("unable to connect server: %v", err)
@@ -18,20 +18,25 @@ func main() {
 
 	defer client.Close()
 
-	if err := client.GeneralInterrogation(0x0001); err != nil {
-		log.Fatalf("unable to execute general interrogation: %v", err)
-	}
-	log.Printf("general interrogation executed successfully")
-
 	for {
-
-		value, quality, err := client.ReadMeasuredValue(1, 1)
+		result, err := client.GeneralInterrogation(0x0001)
 		if err != nil {
-			log.Fatalf("unable to read measured value: %v", err)
+			log.Fatalf("unable to execute general interrogation: %v", err)
 		}
-		log.Printf("measured value: %v, quality: 0x%02X", value, quality)
+		log.Printf("general interrogation result: %v", result)
 
-		time.Sleep(1 * time.Second)
+		time.Sleep(60 * time.Second)
 	}
+
+	// for {
+
+	// 	value, quality, err := client.ReadMeasuredValue(1, 16386)
+	// 	if err != nil {
+	// 		log.Printf("unable to read measured value: %v", err)
+	// 	} else {
+	// 		log.Printf("measured value: %v, quality: 0x%02X", value, quality)
+	// 	}
+	// 	time.Sleep(1 * time.Second)
+	// }
 
 }

@@ -48,7 +48,17 @@ type Client struct {
 	pending   map[string]chan *APDU // key: request ID
 	pendingMu sync.Mutex
 
+	// General interrogation state
+	interrogationMu     sync.Mutex
+	activeInterrogation *interrogationRequest
+
 	enableLog bool
+}
+
+// interrogationRequest holds the state for a pending general interrogation request
+type interrogationRequest struct {
+	resultChan chan map[uint32]InfoObject
+	data       map[uint32]InfoObject
 }
 
 // NewClient creates a new IEC104 client
@@ -516,8 +526,41 @@ func (c *Client) handleAPDU(apdu *APDU) {
 					return
 				}
 			}
+
+			// Check if there is an active interrogation
+			c.interrogationMu.Lock()
+			req := c.activeInterrogation
+			c.interrogationMu.Unlock()
+
+			if req != nil {
+				isInterrogationResponse := false
+				switch apdu.ASDU.Cause {
+				case CauseActCon: // Activation Confirmation
+					if apdu.ASDU.TypeID == TypeInterrogationCmd {
+						c.logf("General interrogation confirmed by server.")
+						isInterrogationResponse = true
+					}
+				case CauseInrogen: // Interrogation Data
+					c.logf("Received %d data points for general interrogation", len(apdu.ASDU.InfoObjects))
+					for _, obj := range apdu.ASDU.InfoObjects {
+						req.data[obj.Address] = obj
+					}
+					isInterrogationResponse = true
+				case CauseActTerm: // Activation Termination
+					if apdu.ASDU.TypeID == TypeInterrogationCmd {
+						c.logf("General interrogation terminated by server.")
+						req.resultChan <- req.data
+						isInterrogationResponse = true
+					}
+				}
+				// If the message was part of the interrogation, we're done with it.
+				if isInterrogationResponse {
+					return
+				}
+			}
 		}
 
+		// If not part of an interrogation, pass to the general response channel
 		select {
 		case c.responseChan <- apdu:
 		default:
@@ -619,67 +662,57 @@ func (c *Client) heartbeatHandler() {
 	}
 }
 
-// GeneralInterrogation general interrogation
-func (c *Client) GeneralInterrogation(commonAddr uint16) error {
+// GeneralInterrogation executes a general interrogation (station interrogation) and returns a map of all received data points.
+func (c *Client) GeneralInterrogation(commonAddr uint16) (map[uint32]InfoObject, error) {
+	c.interrogationMu.Lock()
+	if c.activeInterrogation != nil {
+		c.interrogationMu.Unlock()
+		return nil, errors.New("another general interrogation is already in progress")
+	}
+
+	// Create and register the request
+	req := &interrogationRequest{
+		resultChan: make(chan map[uint32]InfoObject, 1),
+		data:       make(map[uint32]InfoObject),
+	}
+	c.activeInterrogation = req
+	c.interrogationMu.Unlock()
+
+	// Ensure cleanup happens on exit
+	defer func() {
+		c.interrogationMu.Lock()
+		c.activeInterrogation = nil
+		c.interrogationMu.Unlock()
+	}()
 
 	asdu := &ASDU{
 		TypeID:     TypeInterrogationCmd,
-		Variable:   0x01, // SQ=0, count=1
-		Cause:      CauseAct,
+		Variable:   1,        // SQ=0, N=1
+		Cause:      CauseAct, // 6
 		CommonAddr: commonAddr,
 		InfoObjects: []InfoObject{
 			{
-				Address: 0,                  // General interrogation address usually 0
-				Value:   byte(CauseInrogen), // 20: General interrogation qualifier
+				Address: 0,
+				Value:   byte(20), // QOI: Station interrogation
 			},
 		},
 	}
 
 	if err := c.sendIFrame(asdu); err != nil {
-		return fmt.Errorf("failed to send general interrogation command: %v", err)
+		return nil, fmt.Errorf("failed to send general interrogation command: %v", err)
 	}
 
-	c.logf("General interrogation command sent")
+	c.logf("General interrogation command sent, waiting for data...")
 
-	// Wait for confirmation and completion
-	confirmReceived := false
-	terminationReceived := false
-
-	for {
-		select {
-		case resp := <-c.responseChan:
-
-			c.logf("General interrogation completed, data: %v", resp)
-
-			if resp.ASDU == nil || resp.ASDU.TypeID != TypeInterrogationCmd {
-				continue // Ignore non-interrogation responses
-			}
-
-			switch resp.ASDU.Cause {
-			case CauseActCon:
-				c.logf("General interrogation confirmed")
-				confirmReceived = true
-			case CauseActTerm:
-				c.logf("General interrogation completed")
-				terminationReceived = true
-			case CauseInrogen:
-				c.logf("Received general interrogation response data")
-			}
-
-			// If confirmation and termination received, interrogation complete
-			if confirmReceived && terminationReceived {
-				return nil
-			}
-
-		case <-time.After(c.timeout):
-			if !confirmReceived {
-				return errors.New("timeout waiting for general interrogation confirmation")
-			}
-			return errors.New("timeout waiting for general interrogation completion")
-
-		case <-c.ctx.Done():
-			return errors.New("operation cancelled")
-		}
+	// Wait for the result from the receive handler or timeout
+	select {
+	case result := <-req.resultChan:
+		c.logf("General interrogation finished successfully, received %d data points", len(result))
+		return result, nil
+	case <-time.After(c.timeout):
+		return nil, errors.New("timeout waiting for general interrogation to complete")
+	case <-c.ctx.Done():
+		return nil, errors.New("client closed during general interrogation")
 	}
 }
 
