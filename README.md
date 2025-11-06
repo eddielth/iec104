@@ -5,7 +5,7 @@ This project provides a Go implementation of the IEC 60870-5-104 (IEC104) protoc
 ## Features
 
 - Full IEC 60870-5-104 client implementation
-- Support for connection management, heartbeat, and automatic reconnection
+- Support for connection management, heartbeat, and automatic reconnection with exponential backoff
 - General interrogation, measured value reading, and command sending (single, double, setpoint)
 - Clock synchronization
 - Thread-safe design with context cancellation
@@ -48,9 +48,11 @@ func main() {
     defer client.Close()
 
     // General Interrogation
-    err = client.GeneralInterrogation(1)
+    data, err := client.GeneralInterrogation(1)
     if err != nil {
         log.Printf("General Interrogation failed: %v", err)
+    } else {
+        log.Printf("Received %d data points", len(data))
     }
 
     // Read measured value
@@ -75,7 +77,7 @@ func main() {
 - `Connect() error` — Connect to the IEC104 server
 - `Close() error` — Close the connection
 - `IsConnected() bool` — Check if client is connected
-- `GeneralInterrogation(commonAddr uint16) error` — Execute general interrogation
+- `GeneralInterrogation(commonAddr uint16) (map[uint32]InfoObject, error)` — Execute general interrogation
 - `ReadMeasuredValue(commonAddr uint16, objAddr uint32) (interface{}, byte, error)` — Read measured value
 - `SendSingleCommand(addr uint16, objAddr uint32, value bool, selectExec bool) error` — Send single-point command
 - `SendDoubleCommand(addr uint16, obj uint32, val byte) error` — Send double-point command
